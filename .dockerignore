@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose*.yml
+docker/
+README.md
+*.md
+bin/
+tmp/
+*.log
+sistem-manajemen-armada
+.DS_Store

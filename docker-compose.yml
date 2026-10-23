@@ -1,0 +1,154 @@
+name: test-tj
+
+services:
+  # ------------------------------------------------------------
+  # Aplikasi Go (Gin REST API + MQTT consumer + RabbitMQ publisher)
+  # ------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: test-tj-app:latest
+    container_name: test-tj-app
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Nilai di bawah menimpa .env agar menunjuk ke service docker
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-test}
+      DB_PASSWORD: ${DB_PASSWORD:-test}
+      DB_NAME: ${DB_NAME:-test}
+      TCP_BROKER: tcp://mosquitto:1883
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      APP_PORT: "8080"
+      GEOFENCE_LAT: ${GEOFENCE_LAT:--6.1753924}
+      GEOFENCE_LNG: ${GEOFENCE_LNG:-106.8271528}
+      GEOFENCE_RADIUS: ${GEOFENCE_RADIUS:-50}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    networks:
+      - fleet
+
+  # ------------------------------------------------------------
+  # PostgreSQL
+  # ------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    container_name: test-tj-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-test}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-test}
+      POSTGRES_DB: ${DB_NAME:-test}
+    ports:
+      - "${DB_PORT_HOST:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - fleet
+
+  # ------------------------------------------------------------
+  # RabbitMQ (exchange fleet.events + queue geofence_alerts)
+  # ------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: test-tj-rabbitmq
+    # Hostname dikunci agar node name (rabbit@...) stabil dan data di volume
+    # tidak "hilang" setiap container di-recreate.
+    hostname: test-tj-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_UI_PORT:-15673}:15672" # UI: http://localhost:15673
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+    networks:
+      - fleet
+
+  # ------------------------------------------------------------
+  # Eclipse Mosquitto (MQTT broker, topik fleet/vehicle/+/location
+  # dan /fleet/vehicle/+/location)
+  # ------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: test-tj-mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_sub -h 127.0.0.1 -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - fleet
+
+  # ------------------------------------------------------------
+  # Mock publisher: kirim data lokasi tiap 2 detik (profile "mock")
+  # Jalankan: docker compose --profile mock up -d
+  # ------------------------------------------------------------
+  mock-publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    image: test-tj-mock-publisher:latest
+    container_name: test-tj-mock-publisher
+    profiles: ["mock"]
+    restart: unless-stopped
+    environment:
+      MQTT_BROKER: tcp://mosquitto:1883
+      # Sesuai requirement: /fleet/vehicle/{vehicle_id}/location
+      MQTT_TOPIC_TEMPLATE: ${MQTT_TOPIC_TEMPLATE:-/fleet/vehicle/{vehicle_id}/location}
+      VEHICLE_IDS: ${MOCK_VEHICLE_IDS:-B1234XYZ,B5678ABC}
+      PUBLISH_INTERVAL: ${MOCK_INTERVAL:-2s}
+      GEOFENCE_LAT: ${GEOFENCE_LAT:--6.1753924}
+      GEOFENCE_LNG: ${GEOFENCE_LNG:-106.8271528}
+      GEOFENCE_RADIUS: ${GEOFENCE_RADIUS:-50}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    networks:
+      - fleet
+
+networks:
+  fleet:
+    driver: bridge
+
+volumes:
+  pgdata:
+  rabbitmq_data:
+  mosquitto_data:

@@ -1,0 +1,6 @@
+.env
+sistem-manajemen-armada
+bin/
+tmp/
+*.log
+.DS_Store
